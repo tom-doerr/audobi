@@ -1,0 +1,77 @@
+#!/bin/bash
+
+GREP_RUNNING_PATTERN=' ---> Running in '
+SUCCESSFULLY_BUILD_STR='Successfully built'
+
+out_main=$(mktemp)
+out_test=$(mktemp)
+out_grep=$(mktemp)
+
+rm "$out_main $out_test $out_grep" EXIT
+
+get_out_file() {
+    if [[ $1 == 'main' ]]
+    then
+        out_file=$out_main
+    elif [[ $1 == 'test' ]]
+    then
+        out_file=$out_test
+    fi
+    echo $out_file
+}
+
+docker_build() {
+    out_file=$(get_out_file $1)
+    [[ $1 == 'test' ]] && display_file='/dev/null' || display_file='/dev/stdout'
+    stdbuf -i0 -o0 -e0 "${@:2}"| tee $out_file > $display_file
+}
+
+get_build_step() {
+    out_file=$(get_out_file $1)
+    content_out_file=$(cat $out_file)
+    bottom=$(tail -n 2 $out_file)
+    if [[ $bottom == *$SUCCESSFULLY_BUILD_STR* ]]
+    then
+        grep_search_pattern=$SUCCESSFULLY_BUILD_STR
+        context_size=3
+    else
+        grep_search_pattern=$GREP_RUNNING_PATTERN
+        context_size=1
+    fi
+    grep --context $context_size "$grep_search_pattern" $out_file > $out_grep
+    awk 'NR==1{print $2}' $out_grep | 
+        grep -o '[[:digit:]]\+' |
+        head -n 1
+}
+
+while true 
+do
+    echo '' > $out_main
+    docker_build main $@ &
+    pid_main=$!
+    main_up_to_date=true
+    while $main_up_to_date
+    do
+        echo '' > $out_test
+        docker_build test $@ &
+        pid_test=$!
+        disown
+        while [[ $(get_build_step test) == '' ]]
+        do
+            sleep 1
+        done
+        kill $pid_test 2> /dev/null
+        if [[ $(get_build_step test) != $(get_build_step main) ]]
+        then
+            main_up_to_date=false
+            #set -x
+            echo build step test : $(get_build_step test)
+            #set +x
+            echo build step main : $(get_build_step main)
+        fi
+        sleep 1
+    done
+    kill $pid_main
+    printf '===================================\n\n'
+done
+
